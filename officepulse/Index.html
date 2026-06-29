@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+<meta charset="utf-8">
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: Tahoma, 'Segoe UI', sans-serif;
+    background: #0f1115; color: #e8eaed;
+    padding: 18px; min-height: 100vh;
+  }
+  h1 { font-size: 22px; margin-bottom: 4px; }
+  .clock { font-size: 34px; font-weight: bold; color: #4da3ff; letter-spacing: 1px; }
+  .sub { color: #8a909a; font-size: 13px; margin-bottom: 16px; }
+
+  .card {
+    background: #1a1d24; border: 1px solid #2a2e37; border-radius: 14px;
+    padding: 16px 18px; margin-bottom: 12px;
+    display: flex; align-items: center; gap: 14px;
+    transition: all .25s;
+  }
+  .time {
+    font-size: 26px; font-weight: bold; min-width: 78px; text-align: center;
+    color: #b9c0cc;
+  }
+  .task { flex: 1; font-size: 19px; line-height: 1.5; }
+  .done .task { text-decoration: line-through; color: #6b7280; }
+  .done { opacity: .55; border-color: #1f7a3d; }
+  .done .time { color: #4caf50; }
+
+  /* مورد سررسیده و انجام‌نشده → قرمز و چشمک‌زن */
+  .overdue {
+    border-color: #ff3b3b; background: #2a1414;
+    animation: pulse 1s infinite;
+  }
+  .overdue .time { color: #ff5252; }
+  @keyframes pulse {
+    0%,100% { box-shadow: 0 0 0 0 rgba(255,59,59,.0); }
+    50%     { box-shadow: 0 0 24px 4px rgba(255,59,59,.55); }
+  }
+
+  .doneAt { font-size: 12px; color: #4caf50; min-width: 70px; text-align: center; }
+
+  .btn {
+    border: none; border-radius: 10px; padding: 12px 18px;
+    font-size: 16px; font-family: inherit; cursor: pointer; font-weight: bold;
+  }
+  .btn-done { background: #2e7d32; color: #fff; }
+  .btn-done:hover { background: #388e3c; }
+  .btn-undo { background: #3a3f4a; color: #cfd3da; font-size: 13px; padding: 8px 12px; }
+
+  .banner {
+    display: none; position: fixed; top: 0; left: 0; right: 0;
+    background: #ff3b3b; color: #fff; padding: 14px;
+    font-size: 20px; font-weight: bold; text-align: center; z-index: 50;
+  }
+  .banner.show { display: block; animation: pulse 1s infinite; }
+  .empty { color: #8a909a; text-align: center; padding: 40px; font-size: 17px; }
+  .progress { color: #8a909a; font-size: 14px; margin-bottom: 14px; }
+</style>
+</head>
+<body>
+  <div id="banner" class="banner"></div>
+
+  <h1>📋 برنامه کاری امروز</h1>
+  <div class="clock" id="clock">--:--</div>
+  <div class="sub" id="date"></div>
+  <div class="progress" id="progress"></div>
+
+  <div id="list"></div>
+
+<script>
+  var REFRESH_MS = 5000;       // بازخوانی شیت هر ۵ ثانیه
+  var REMIND_EVERY_MS = 120000; // یادآوری صوتی مجدد هر ۲ دقیقه
+  var lastAlarmAt = {};        // زمان آخرین آلارم هر مورد
+  var audioCtx = null;
+
+  function initAudio() {
+    if (!audioCtx) {
+      try { audioCtx = new (window.AudioContext || window.webkitAudioContext)(); }
+      catch (e) {}
+    }
+  }
+  document.body.addEventListener('click', initAudio, { once: true });
+
+  function beep() {
+    if (!audioCtx) return;
+    var t = audioCtx.currentTime;
+    [0, 0.35, 0.7].forEach(function (off) {
+      var o = audioCtx.createOscillator();
+      var g = audioCtx.createGain();
+      o.type = 'sine';
+      o.frequency.value = 880;
+      g.gain.setValueAtTime(0.0001, t + off);
+      g.gain.exponentialRampToValueAtTime(0.4, t + off + 0.02);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + off + 0.28);
+      o.connect(g); g.connect(audioCtx.destination);
+      o.start(t + off); o.stop(t + off + 0.3);
+    });
+  }
+
+  function timeToMin(hm) {
+    var p = (hm || '').split(':');
+    if (p.length < 2) return 99999;
+    return parseInt(p[0], 10) * 60 + parseInt(p[1], 10);
+  }
+
+  function render(data) {
+    var now = data.now;
+    document.getElementById('clock').textContent = now;
+    document.getElementById('date').textContent =
+      new Date().toLocaleDateString('fa-IR', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
+
+    var rows = data.rows || [];
+    var list = document.getElementById('list');
+    var nowMin = timeToMin(now);
+
+    if (rows.length === 0) {
+      list.innerHTML = '<div class="empty">موردی برای امروز ثبت نشده است.</div>';
+      document.getElementById('banner').classList.remove('show');
+      return;
+    }
+
+    var doneCount = rows.filter(function (r) { return r.done; }).length;
+    var overdueList = [];
+    var html = '';
+
+    rows.forEach(function (r) {
+      var overdue = !r.done && timeToMin(r.time) <= nowMin;
+      if (overdue) overdueList.push(r);
+      var cls = r.done ? 'done' : (overdue ? 'overdue' : '');
+      html += '<div class="card ' + cls + '">' +
+        '<div class="time">' + r.time + '</div>' +
+        '<div class="task">' + escapeHtml(r.task) + '</div>';
+      if (r.done) {
+        html += '<div class="doneAt">✔ ' + (r.doneAt || '') + '</div>' +
+          '<button class="btn btn-undo" onclick="undo(' + r.row + ')">برگردان</button>';
+      } else {
+        html += '<button class="btn btn-done" onclick="done(' + r.row + ')">انجام شد</button>';
+      }
+      html += '</div>';
+    });
+
+    list.innerHTML = html;
+    document.getElementById('progress').textContent =
+      'انجام‌شده: ' + doneCount + ' از ' + rows.length;
+
+    // مدیریت آلارم
+    var banner = document.getElementById('banner');
+    if (overdueList.length > 0) {
+      banner.textContent = '⏰ ' + overdueList.length + ' مورد در انتظار انجام: ' +
+        overdueList.map(function (r) { return r.time + ' ' + r.task; }).join(' | ');
+      banner.classList.add('show');
+
+      var nowTs = Date.now();
+      overdueList.forEach(function (r) {
+        var key = r.row;
+        if (!lastAlarmAt[key] || nowTs - lastAlarmAt[key] >= REMIND_EVERY_MS) {
+          beep();
+          lastAlarmAt[key] = nowTs;
+        }
+      });
+    } else {
+      banner.classList.remove('show');
+    }
+  }
+
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"]/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c];
+    });
+  }
+
+  function load() {
+    google.script.run.withSuccessHandler(render).getTasks();
+  }
+  function done(row) {
+    delete lastAlarmAt[row];
+    google.script.run.withSuccessHandler(render).markDone(row);
+  }
+  function undo(row) {
+    google.script.run.withSuccessHandler(render).unmarkDone(row);
+  }
+
+  load();
+  setInterval(load, REFRESH_MS);
+</script>
+</body>
+</html>
